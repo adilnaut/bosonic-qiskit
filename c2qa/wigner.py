@@ -157,7 +157,8 @@ def _wigner(state, xvec, yvec = None):
     if not yvec:
         yvec = xvec
 
-    return _wigner_iterative(rho, xvec, yvec)
+    return _wigner_clenshaw(rho, xvec, yvec)
+    # return _wigner_iterative(rho, xvec, yvec)
 
 
 def _wigner_iterative(rho, xvec, yvec, g=sqrt(2)):
@@ -165,7 +166,7 @@ def _wigner_iterative(rho, xvec, yvec, g=sqrt(2)):
     Wigner function as implemented in QuTiP (i.e., copy/paste). QuTiP is released under the BSD 3-clause license: https://github.com/qutip/qutip/blob/master/LICENSE.txt
 
     See https://github.com/qutip/qutip/blob/master/qutip/wigner.py#L257-L300
-    
+
     Using an iterative method to evaluate the wigner functions for the Fock
     state :math:`|m><n|`.
     The Wigner function is calculated as
@@ -206,6 +207,98 @@ def _wigner_iterative(rho, xvec, yvec, g=sqrt(2)):
             W += 2 * real(rho[m, n] * Wlist[n])
 
     return 0.5 * W * g ** 2
+
+
+def _wigner_clenshaw(rho, xvec, yvec, g=sqrt(2), sparse=True):
+    r"""
+    Wigner Cleanshaw function as implemented in QuTiP.
+    It's a copy; however, rho.data was transformed to scipy sparce matrix
+        and further rho accessing lines were changed for compatibility rho.data -> rho
+    QuTiP is released under the BSD 3-clause license: https://github.com/qutip/qutip/blob/master/LICENSE.txt
+
+    See https://github.com/qutip/qutip/blob/master/qutip/wigner.py#L447-L486
+
+    Using Clenshaw summation - numerically stable and efficient
+    iterative algorithm to evaluate polynomial series.
+
+    The Wigner function is calculated as
+    :math:`W = e^(-0.5*x^2)/pi * \sum_{L} c_L (2x)^L / sqrt(L!)` where
+    :math:`c_L = \sum_n \\rho_{n,L+n} LL_n^L` where
+    :math:`LL_n^L = (-1)^n sqrt(L!n!/(L+n)!) LaguerreL[n,L,x]`
+
+    """
+    from scipy import sparse
+    from qutip.cy.sparse_utils import _csr_get_diag
+
+    # assuming rho.data is numpy array
+    rho = sparse.csr_matrix(rho.data)
+
+    # w0 = (2*rho_data_sparse[0,-1])*np.ones_like(A2)
+
+    M = np.prod(rho.shape[0])
+    X,Y = np.meshgrid(xvec, yvec)
+    #A = 0.5 * g * (X + 1.0j * Y)
+    A2 = g * (X + 1.0j * Y) #this is A2 = 2*A
+
+    B = np.abs(A2)
+    B *= B
+    w0 = (2*rho[0,-1])*np.ones_like(A2)
+    # w0 = (2*rho.data[0,-1])*np.ones_like(A2)
+    L = M-1
+    #calculation of \sum_{L} c_L (2x)^L / sqrt(L!)
+    #using Horner's method
+    if not sparse:
+        rho = rho.full() * (2*np.ones((M,M)) - np.diag(np.ones(M)))
+        while L > 0:
+            L -= 1
+            #here c_L = _wig_laguerre_val(L, B, np.diag(rho, L))
+            w0 = _wig_laguerre_val(L, B, np.diag(rho, L)) + w0 * A2 * (L+1)**-0.5
+    else:
+        while L > 0:
+            L -= 1
+            diag = _csr_get_diag(rho.data,rho.indices,
+                                rho.indptr,L)
+            if L != 0:
+                diag *= 2
+            #here c_L = _wig_laguerre_val(L, B, np.diag(rho, L))
+            w0 = _wig_laguerre_val(L, B, diag) + w0 * A2 * (L+1)**-0.5
+
+    return w0.real * np.exp(-B*0.5) * (g*g*0.5 / pi)
+
+
+def _wig_laguerre_val(L, x, c):
+    r"""
+    Wigner Cleanshaw function helper as implemented in QuTiP.
+    It's a copy; however, rho.data was transformed to scipy sparce matrix
+        and further rho accessing lines were changed for compatibility rho.data -> rho
+    QuTiP is released under the BSD 3-clause license: https://github.com/qutip/qutip/blob/master/LICENSE.txt
+
+    See https://github.com/qutip/qutip/blob/master/qutip/wigner.py#L489-L520
+
+    this is evaluation of polynomial series inspired by hermval from numpy.
+    Returns polynomial series
+    \sum_n b_n LL_n^L,
+    where
+    LL_n^L = (-1)^n sqrt(L!n!/(L+n)!) LaguerreL[n,L,x]
+    The evaluation uses Clenshaw recursion
+    """
+
+    if len(c) == 1:
+        y0 = c[0]
+        y1 = 0
+    elif len(c) == 2:
+        y0 = c[0]
+        y1 = c[1]
+    else:
+        k = len(c)
+        y0 = c[-2]
+        y1 = c[-1]
+        for i in range(3, len(c) + 1):
+            k -= 1
+            y0,    y1 = c[-i] - y1 * (float((k - 1)*(L + k - 1))/((L+k)*k))**0.5, \
+            y0 - y1 * ((L + 2*k -1) - x) * ((L+k)*k)**-0.5
+
+    return y0 - y1 * ((L + 1) - x) * (L + 1)**-0.5
 
 
 def plot_wigner(
@@ -379,7 +472,7 @@ def plot_wigner_projection(circuit: CVCircuit, qubit, file: str = None, draw_gri
 
 def plot_wigner_snapshot(
     circuit: CVCircuit,
-    result: Result, 
+    result: Result,
     folder: Path = None,
     trace: bool = True,
     axes_min: int = -6,
@@ -396,7 +489,7 @@ def plot_wigner_snapshot(
             file = Path(folder, f"{label}.png")
         else:
             file = f"{label}.png"
-        
+
         snapshot = snapshots[label]
         index = 0
         if len(snapshot) > 1:
